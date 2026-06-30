@@ -25,6 +25,7 @@ class ClassificationLoss(nn.Module):
         Returns:
             tensor, scalar loss
         """
+        # CrossEntropyLoss expects unnormalized scores (logits) and target class indices
         return nn.functional.cross_entropy(logits, target)
 
 
@@ -42,8 +43,11 @@ class LinearClassifier(nn.Module):
             num_classes: int, number of classes
         """
         super().__init__()
-
-        self.fc = nn.Linear(3 * h * w, num_classes)
+        # Flattened size of a 3-channel (RGB) image
+        input_dim = 3 * h * w
+        
+        # Single linear mapping stage directly to target class output logits
+        self.linear = nn.Linear(input_dim, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -53,7 +57,9 @@ class LinearClassifier(nn.Module):
         Returns:
             tensor (b, num_classes) logits
         """
-        return self.fc(x.view(x.size(0), -1))
+        # Flatten starting from the first dimension to preserve batch dimension (b, 3*H*W)
+        x_flat = torch.flatten(x, start_dim=1)
+        return self.linear(x_flat)
 
 
 class MLPClassifier(nn.Module):
@@ -73,11 +79,13 @@ class MLPClassifier(nn.Module):
             num_classes: int, number of classes
         """
         super().__init__()
-
+        input_dim = 3 * h * w
+        
+        # Single hidden layer block with activation function mapping to output
         self.network = nn.Sequential(
-            nn.Linear(3 * h * w, hidden_dim),
+            nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, num_classes),
+            nn.Linear(hidden_dim, num_classes)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -88,7 +96,8 @@ class MLPClassifier(nn.Module):
         Returns:
             tensor (b, num_classes) logits
         """
-        return self.network(x.view(x.size(0), -1))
+        x_flat = torch.flatten(x, start_dim=1)
+        return self.network(x_flat)
 
 
 class MLPClassifierDeep(nn.Module):
@@ -98,7 +107,7 @@ class MLPClassifierDeep(nn.Module):
         w: int = 64,
         num_classes: int = 6,
         hidden_dim: int = 128,
-        num_layers: int = 4,
+        num_layers: int = 10,
     ):
         """
         An MLP with multiple hidden layers
@@ -107,18 +116,25 @@ class MLPClassifierDeep(nn.Module):
             h: int, height of image
             w: int, width of image
             num_classes: int
-
-        Hint - you can add more arguments to the constructor such as:
             hidden_dim: int, size of hidden layers
             num_layers: int, number of hidden layers
         """
         super().__init__()
-
-        layers = [nn.Linear(3 * h * w, hidden_dim), nn.ReLU()]
+        input_dim = 3 * h * w
+        
+        layers = []
+        # Input projection layer
+        layers.append(nn.Linear(input_dim, hidden_dim))
+        layers.append(nn.ReLU())
+        
+        # Dynamic sequential stacking of additional hidden blocks
         for _ in range(num_layers - 1):
-            layers += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU()]
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            
+        # Terminal classification mapping
         layers.append(nn.Linear(hidden_dim, num_classes))
-
+        
         self.network = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -129,21 +145,32 @@ class MLPClassifierDeep(nn.Module):
         Returns:
             tensor (b, num_classes) logits
         """
-        return self.network(x.view(x.size(0), -1))
+        x_flat = torch.flatten(x, start_dim=1)
+        return self.network(x_flat)
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, hidden_dim: int):
+    """
+    A robust MLP residual block using structural regularization adjustments
+    """
+    def __init__(self, dim: int):
         super().__init__()
-        self.block = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-        self.relu = nn.ReLU()
+        self.linear1 = nn.Linear(dim, dim)
+        self.ln1 = nn.LayerNorm(dim)
+        self.act1 = nn.ReLU()
+        self.linear2 = nn.Linear(dim, dim)
+        self.ln2 = nn.LayerNorm(dim)
+        self.act2 = nn.ReLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.relu(x + self.block(x))
+        residual = x
+        out = self.linear1(x)
+        out = self.ln1(out)
+        out = self.act1(out)
+        out = self.linear2(out)
+        out = self.ln2(out)
+        out = self.act2(out + residual)
+        return out
 
 
 class MLPClassifierDeepResidual(nn.Module):
@@ -153,23 +180,32 @@ class MLPClassifierDeepResidual(nn.Module):
         w: int = 64,
         num_classes: int = 6,
         hidden_dim: int = 128,
-        num_layers: int = 4,
+        num_layers: int = 10,
     ):
         """
         Args:
             h: int, height of image
             w: int, width of image
             num_classes: int
-
-        Hint - you can add more arguments to the constructor such as:
             hidden_dim: int, size of hidden layers
-            num_layers: int, number of hidden layers
+            num_layers: int, number of residual blocks to stack
         """
         super().__init__()
-
-        self.input_proj = nn.Sequential(nn.Linear(3 * h * w, hidden_dim), nn.ReLU())
-        self.residual_blocks = nn.ModuleList([ResidualBlock(hidden_dim) for _ in range(num_layers)])
-        self.output_proj = nn.Linear(hidden_dim, num_classes)
+        input_dim = 3 * h * w
+        
+        # 1. Expand input features cleanly to match target hidden sizing dimensions
+        self.input_layer = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU()
+        )
+        
+        # 2. Dynamic stack of residual block loops
+        blocks = [ResidualBlock(hidden_dim) for _ in range(num_layers)]
+        self.residual_hidden_stack = nn.Sequential(*blocks)
+        
+        # 3. Final projection from hidden working space down to target logits
+        self.output_layer = nn.Linear(hidden_dim, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -179,10 +215,11 @@ class MLPClassifierDeepResidual(nn.Module):
         Returns:
             tensor (b, num_classes) logits
         """
-        out = self.input_proj(x.view(x.size(0), -1))
-        for block in self.residual_blocks:
-            out = block(out)
-        return self.output_proj(out)
+        x_flat = torch.flatten(x, start_dim=1)
+        out = self.input_layer(x_flat)
+        out = self.residual_hidden_stack(out)
+        logits = self.output_layer(out)
+        return logits
 
 
 model_factory = {
