@@ -180,7 +180,7 @@ class MLPClassifierDeepResidual(nn.Module):
         w: int = 64,
         num_classes: int = 6,
         hidden_dim: int = 128,
-        num_layers: int = 10,
+        num_layers: int = 8,
     ):
         """
         Args:
